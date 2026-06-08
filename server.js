@@ -1,90 +1,94 @@
 const express = require('express');
-const cors = require('cors');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode');
+const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const port = process.env.PORT || 8080;
 
-app.use(cors({ origin: '*' }));
+app.use(cors());
 app.use(express.json());
 
-// مسار ترحيبي باش نتأكدو أن السيرفر شغال أونلاين
-app.get('/', (req, res) => {
-    res.json({ status: "ONLINE", message: "Serveur Multi-Enseignants de Jihane est opérationnel!" });
+// إعداد السيرفر مع نسخة واتساب أونلاين خفيفة ومضمونة بلا كروم وبلا مشاكل لينوكس
+const client = new Client({
+    authStrategy: new LocalAuth({ clientId: "walearn-session" }),
+    webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
+    },
+    puppeteer: {
+        handleSIGINT: false,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ],
+    }
 });
 
-// تخزين جلسات وحالات الأساتذة بشكل منفصل
-let clients = {};
-let clientsStatus = {};
+let serverStatus = 'INITIALIZING';
 
-function initClient(phone) {
-    if (clients[phone]) return; // إذا كان الأستاذ متصل ديجا متقيسوش
+client.on('loading_screen', (percent, message) => {
+    console.log('Chargement WhatsApp :', percent, '% -', message);
+    serverStatus = 'INITIALIZING';
+});
 
-    clientsStatus[phone] = 'INITIALIZING';
+client.on('qr', () => {
+    console.log('QR Code disponible (Non utilisé pour le flow Pairing Code)');
+    serverStatus = 'QR_READY';
+});
 
-    // إنشاء جلسة معزولة وخاصة برقم هاتف الأستاذ
-    clients[phone] = new Client({
-        authStrategy: new LocalAuth({ clientId: `session-${phone}` }),
-        puppeteer: {
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        }
-    });
+client.on('authenticated', () => {
+    console.log('WhatsApp Authentifié !');
+});
 
-    clients[phone].on('qr', (qr) => {
-        clientsStatus[phone] = 'QR_READY';
-        console.log(`[QR] Code disponible pour l'enseignant: ${phone}`);
-    });
+client.on('ready', () => {
+    console.log('السيرفر واجد ومستعد والواتساب متصل بنجاح! ✅');
+    serverStatus = 'READY';
+});
 
-    clients[phone].on('ready', () => {
-        clientsStatus[phone] = 'READY';
-        console.log(`✅ [READY] WhatsApp connecté pour l'enseignant: ${phone}`);
-    });
+client.on('disconnected', () => {
+    console.log('تم فصل الواتساب ❌');
+    serverStatus = 'DISCONNECTED';
+});
 
-    clients[phone].on('disconnected', () => {
-        clientsStatus[phone] = 'DISCONNECTED';
-        delete clients[phone];
-    });
+// تشغيل الواتساب ف الكواليس
+client.initialize().catch(err => {
+    console.error('Erreur initialisation client:', err);
+});
 
-    clients[phone].initialize().catch(err => console.error(`Erreur pour ${phone}:`, err));
-}
+// ── Endpoints ديال السيرفر ──────────────────────────────────────────────────
 
-// استقبال طلبات كود الربط من الأساتذة بشكل ديناميكي
+// 1. معرفة حالة السيرفر
+app.get('/status', (req, res) => {
+    res.json({ status: serverStatus });
+});
+
+// 2. طلب كود الربط السحري (Pairing Code)
 app.post('/pairing-code', async (req, res) => {
-    let phone = req.body.phone || req.body.number || req.body.phoneNumber;
+    const { phone } = req.body;
+    console.log(`طلب كود ربط جديد للأستاذ: ${phone} 🚀`);
 
     if (!phone) {
-        return res.status(400).json({ error: 'Missing phone number' });
-    }
-
-    // تنظيف رقم الهاتف ليصبح أرقام فقط (مثال: 212611223344)
-    phone = phone.replace(/[^0-9]/g, '');
-
-    console.log(`🚀 طلب كود ربط جديد للأستاذ: ${phone}`);
-
-    // تشغيل جلسة خاصة بهاد الأستاذ إذا لم تكن موجودة
-    if (!clients[phone]) {
-        initClient(phone);
-    }
-
-    // انتطار السيرفر يجهز (حد أقصى 15 ثانية)
-    let checkCount = 0;
-    while (clientsStatus[phone] === 'INITIALIZING' && checkCount < 30) {
-        await new Promise(r => setTimeout(r, 500));
-        checkCount++;
+        return res.status(400).json({ error: 'Veuillez fournir un numéro de téléphone' });
     }
 
     try {
-        const code = await clients[phone].requestPairingCode(phone);
-        console.log(`🎯 [CODE] الأستاذ ${phone} -> الكود هو: ${code}`);
-        res.json({ code: code, pairingCode: code, status: "SUCCESS" });
+        // طلب الكود من الواتساب ديريكت
+        const code = await client.requestPairingCode(phone);
+        console.log(`✅ الكود تخرج بنجاح وهو: ${code}`);
+        res.json({ code: code, pairingCode: code });
     } catch (err) {
-        console.error("Erreur pairing:", err);
-        res.status(500).json({ error: err.message });
+        console.error('خطأ أثناء طلب كود الربط:', err.message);
+        res.status(500).json({ error: 'Erreur pairing: ' + err.message });
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`✅ السيرفر الاحترافي شغال على البورت ${PORT}`);
+// تشغيل سيرفر Express
+app.listen(port, () => {
+    console.log(`السيرفر شغال ناضي ف البورت: ${port} 🚀`);
 });
